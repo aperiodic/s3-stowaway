@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<metadata>
+  <groupId>#{project}</groupId>
+  <artifactId>#{project}</artifactId>
+  <version>#{version}</version>
+  <versioning>
+    <snapshot>
+      <timestamp>00000000.000000</timestamp>
+      <buildNumber>0</buildNumber>
+    </snapshot>
+    <lastUpdated>00000000000000</lastUpdated>
+  </versioning>
+</metadata>

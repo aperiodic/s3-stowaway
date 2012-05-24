@@ -1,0 +1,167 @@
+#!/bin/bash
+
+function upload_file_and_sums {
+  path=$1
+  file=`basename $path`
+  dest=$2
+  md5sum $path | awk '{printf "%s",$1}' > $TEMP/$file.md5
+  sha1sum $path | awk '{printf "%s",$1}' > $TEMP/$file.sha1
+  s3cmd put $path $dest
+  s3cmd put $TEMP/$file.md5 $dest.md5
+  s3cmd put $TEMP/$file.sha1 $dest.sha1
+  rm $TEMP/$file.md5
+  rm $TEMP/$file.sha1
+}
+
+# if you're hacking on this script, it's useful to change DEBUG to true, which
+# prevents pushing anything to S3 or cleaning up the temp files, and TEMP to '.'
+DEBUG=false
+TEMP=`mktemp -d /tmp/uber-deploy-XXXXXXXX`
+
+if [[ ! -z `readlink $0` ]]; then
+  target=`readlink $0`
+  RESOURCES=`dirname $target`/resources
+else
+  RESOURCES=`dirname $0`/resources
+fi
+
+if [[ -z $1 ]]; then
+  echo 'usage: stowaway $bucket_name' 1>&2
+  exit 1
+fi
+bucket=s3://$1
+
+if [[ ! -e pom.xml ]]; then
+  echo "Can't find a pom.xml in the current directory!" 1>&2
+  exit 2
+fi
+
+
+project=`grep -o "<name>.*</name>" pom.xml | sed 's|<\(/\)\?name>||g'`
+
+# remove the dependencies from the pom
+dep_start=`grep -n "<dependencies>" pom.xml | awk 'BEGIN { FS = ":"} {print $1}'`
+dep_stop=`grep -n "</dependencies>" pom.xml | awk 'BEGIN { FS = ":"} {print $1}'`
+if [[ ! -z $dep_start && ! -z $dep_stop ]]; then
+  sed -n 1,${dep_start}p pom.xml >> $TEMP/pom-no-deps.xml
+  sed -n ${dep_stop},\$p pom.xml >> $TEMP/pom-no-deps.xml
+  mv $TEMP/pom-no-deps.xml pom.xml
+fi
+
+# extract the version number from the pom
+version=`grep "<version>" pom.xml \
+         | grep '[[:digit:]]\+\.[[:digit:]]\+\.[[:digit:]]\+\(-SNAPSHOT\)\?' -o`
+if [[ $version =~ 'SNAPSHOT' ]]; then
+  subrepo='snapshots'
+  snapshot=true
+else
+  subrepo='releases'
+fi
+
+artifact_folder=$bucket/$subrepo/$project/$project
+version_folder=$artifact_folder/$version
+
+# determine the name of the .jar and .pom files
+if [ $snapshot ]; then
+  numeric_version=`echo $version | sed 's/-SNAPSHOT//'`
+  artifact_name=$project-$numeric_version-$stamp-$build
+else
+  artifact_name=$project-$version
+fi
+
+if [[ ! -e $artifact_name.jar ]]; then
+  echo "Can't find $artifact_name.jar in the current directory!" 1>&2
+  exit 3
+fi
+
+
+# generate timestamps to stick into the maven-metadata.xml files
+now=`date -u`
+stamp=`date -u -d "$now" +%Y%m%d.%H%M%S`
+last_updated=`date -u -d "$now" +%Y%m%d%H%M%S`
+
+
+# if we're uploading a snapshot, then the maven-metadata.xml file in the version
+# folder needs to be updated with the build number and timestamps
+if [ $snapshot ]; then
+  # pull down the current maven-metadata.xml file from the version folder
+  if [ $DEBUG == false ]; then
+    s3cmd get $version_folder/maven-metadata.xml $TEMP/snapshot-metadata.xml
+  fi
+
+  # if getting the file failed, assume the file DNE in s3 and use our template
+  if [[ ! -s $TEMP/snapshot-metadata.xml ]]; then
+    sed -e "s/#{version}/$version/" \
+        -e "s/#{project}/$project/" \
+        $RESOURCES/snapshot-metadata-template.xml > $TEMP/snapshot-metadata.xml
+  fi
+
+  # extract the last build number
+  last_build=`grep 'buildNumber' $TEMP/snapshot-metadata.xml \
+              | tail -n 1 \
+              | sed 's/^.*>\([0-9]\+\)<.*$/\1/'`
+  build=$((last_build + 1))
+
+  # replace timestamp, build number, and last-updated stamp in snapshot-metadata
+  sed -e "s|<timestamp>[0-9]\{8\}.[0-9]\{6\}</timestamp>|<timestamp>$stamp</timestamp>|" \
+      -e "s|<buildNumber>$last_build</buildNumber>|<buildNumber>$build</buildNumber>|" \
+      -e "s|<lastUpdated>[0-9]\{14\}</lastUpdated>|<lastUpdated>$last_updated</lastUpdated>|" \
+      $TEMP/snapshot-metadata.xml > $TEMP/snapshot-metadata-updated.xml
+  mv $TEMP/snapshot-metadata-updated.xml $TEMP/snapshot-metadata.xml
+
+  if [ $DEBUG == false ]; then
+    upload_file_and_sums $TEMP/snapshot-metadata.xml $version_folder/maven-metadata.xml
+  fi
+fi
+
+
+# update the artifact folder's maven metadata file
+if [ $DEBUG == false ]; then
+  s3cmd get $artifact_folder/maven-metadata.xml $TEMP/artifact-metadata.xml
+fi
+
+# if getting the file failed, assume the file DNE in s3 and use our template
+if [[ ! -s $TEMP/artifact-metadata.xml ]]; then
+  sed -e "s/#{version}/$version/" \
+      -e "s/#{project}/$project/" \
+      $RESOURCES/artifact-metadata-template.xml > $TEMP/artifact-metadata.xml
+fi
+
+# sse if our version already exists and add it if not
+version_lines=`grep "<version>$version</version>" $TEMP/artifact-metadata.xml | wc -l`
+if [[ $version_lines -eq 0 ]]; then
+  versions_stop=`grep -n "</versions>" $TEMP/artifact-metadata.xml \
+                 | awk 'BEGIN { FS = ":"} {print $1}'`
+  last_version=$((versions_stop - 1))
+  sed -n 1,${last_version}p $TEMP/artifact-metadata.xml \
+    >> $TEMP/artifact-metadata-new-version.xml
+  echo "      <version>$version</version>" >> $TEMP/artifact-metadata-new-version.xml
+  sed -n $versions_stop,\$p $TEMP/artifact-metadata.xml \
+    >> $TEMP/artifact-metadata-new-version.xml
+  mv $TEMP/artifact-metadata-new-version.xml $TEMP/artifact-metadata.xml
+fi
+
+# replace the last updated timestamp
+sed "s|<lastUpdated>[0-9]\{14\}</lastUpdated>|<lastUpdated>$last_updated</lastUpdated>|" \
+  $TEMP/artifact-metadata.xml >> $TEMP/artifact-metadata-updated.xml
+mv $TEMP/artifact-metadata-updated.xml $TEMP/artifact-metadata.xml
+
+if [ $DEBUG == false ]; then
+  upload_file_and_sums $TEMP/artifact-metadata.xml $artifact_folder/maven-metadata.xml
+fi
+
+# the LCP of the .jar and .pom files' S3 paths
+s3_path=$bucket/$subrepo/$project/$project/$version/$artifact_name
+
+# upload the jar and pom files
+cp pom.xml $TEMP/$artifact_name.pom
+cp $artifact_name.jar $TEMP/$artifact_name.jar
+if [ $DEBUG == false ]; then
+  for file in jar pom; do
+    upload_file_and_sums $TEMP/$artifact_name.$file $s3_path.$file
+  done
+fi
+
+if [ $DEBUG == false ]; then
+  rm -r $TEMP
+fi
