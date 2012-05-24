@@ -36,19 +36,8 @@ if [[ ! -e pom.xml ]]; then
   exit 2
 fi
 
-
+# extract the project and version number from the pom
 project=`grep -o "<name>.*</name>" pom.xml | sed 's|<\(/\)\?name>||g'`
-
-# remove the dependencies from the pom
-dep_start=`grep -n "<dependencies>" pom.xml | awk 'BEGIN { FS = ":"} {print $1}'`
-dep_stop=`grep -n "</dependencies>" pom.xml | awk 'BEGIN { FS = ":"} {print $1}'`
-if [[ ! -z $dep_start && ! -z $dep_stop ]]; then
-  sed -n 1,${dep_start}p pom.xml >> $TEMP/pom-no-deps.xml
-  sed -n ${dep_stop},\$p pom.xml >> $TEMP/pom-no-deps.xml
-  mv $TEMP/pom-no-deps.xml pom.xml
-fi
-
-# extract the version number from the pom
 version=`grep "<version>" pom.xml \
          | grep '[[:digit:]]\+\.[[:digit:]]\+\.[[:digit:]]\+\(-SNAPSHOT\)\?' -o`
 if [[ $version =~ 'SNAPSHOT' ]]; then
