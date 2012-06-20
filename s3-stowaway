@@ -39,7 +39,8 @@ fi
 # extract the project and version number from the pom
 project=`grep -o "<name>.*</name>" pom.xml | sed 's|<\(/\)\?name>||g'`
 version=`grep "<version>" pom.xml \
-         | grep '[[:digit:]]\+\.[[:digit:]]\+\.[[:digit:]]\+\(-SNAPSHOT\)\?' -o`
+         | grep '[[:digit:]]\+\.[[:digit:]]\+\.[[:digit:]]\+\(-SNAPSHOT\)\?' -o \
+         | head -n 1`
 if [[ $version =~ 'SNAPSHOT' ]]; then
   subrepo='snapshots'
   snapshot=true
